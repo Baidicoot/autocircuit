@@ -45,13 +45,14 @@ class ComputeGraph:
         return [edge[0] for edge in self.edges if edge[1] == node]
 
     @classmethod
-    def merge_many(cls, graphs: List[ComputeGraph], root: str):
-        nodes = {}
-        edges = []
+    def merge_many(cls, graphs: List[ComputeGraph], root: Tuple[str, lens.HookPoint]):
+        nodes = {root[0]: root[1]}
+        edges = [(graph.root, root[0]) for graph in graphs]
+        roots = [graph.root for graph in graphs]
         for graph in graphs:
             nodes.update(graph.nodes)
             edges.extend(graph.edges)
-        return cls(nodes, edges, root)
+        return cls(nodes, edges, root[0])
 
 def path_tracing(net: Callable[[List[Tuple[Callable, lens.HookPoint]], torch.Tensor], torch.Tensor], graph: ComputeGraph, node: str, prompts: torch.Tensor, counterfactual_activations: Dict[str, torch.Tensor], loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], threshold: float, ablation_mode: Literal["zero", "sample", "mean"]) -> ComputeGraph:
     # recursively find all nodes that affect the output of `node`
