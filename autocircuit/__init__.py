@@ -7,6 +7,8 @@ import torch.nn.functional as F
 
 # TODO: figure out why ablations are fucked
 
+all_tensors = {}
+
 def autocircuit(
         model: GraphedModel,
         graph: ComputeGraph,
@@ -22,6 +24,8 @@ def autocircuit(
 
     def ablate_node(child):
         def go(tensor):
+            all_tensors[child] = tensor.clone()
+
             replacement = None
             if ablation_mode == "zero":
                 replacement = torch.zeros_like(tensor)
