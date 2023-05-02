@@ -1,100 +1,135 @@
 import transformer_lens as lens
 from typing import Dict, Tuple, List, Literal, Callable, Any
 import torch
-from typeguard import typechecked
+import random
+from .graphed_model import GraphedModel, ComputeGraph
+import torch.nn.functional as F
 
-# thing representing some (contiguous) selection of activations in a network
-class PartialHook:
-    def __init__(self, hook_point: str, hook_read: Callable[torch.Tensor, torch.Tensor], hook_repl: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]):
-        self.hook_point = hook_point
-        self.hook_read = hook_read
-        self.hook_repl = hook_repl
+# TODO: figure out why ablations are fucked
 
-# a ComputeGraph is a DAG that represents the causal relationship between hooks/nodes
-# the path tracing algorithm outputs a simpler graph that is a subset of the input graph
-class ComputeGraph:
-    def __init__(self, nodes: Dict[str, PartialHook], edges: Tuple[str, str], root: str):
-        self.nodes = nodes
-        self.edges = edges
-        self.root = root
+def autocircuit(
+        model: GraphedModel,
+        graph: ComputeGraph,
+        root_n: str,
+        prompts: torch.Tensor,
+        cf_acts: Dict[str, torch.Tensor],
+        threshold: float,
+        ablation_mode: Literal["zero", "sample", "mean"] = "sample") -> ComputeGraph:
+    # do a BFS on important nodes
+    done = []
+    queue = [root_n]
+    ablated = []
 
-        self.no_cycles()
-        self.all_reachable()
+    def ablate_node(child):
+        def go(tensor):
+            replacement = None
+            if ablation_mode == "zero":
+                replacement = torch.zeros_like(tensor)
+            elif ablation_mode == "sample":
+                replacement = cf_acts[child][random.randint(0, cf_acts[child].size(0) - 1)].repeat(tensor.size(0))
+            elif ablation_mode == "mean":
+                replacement = cf_acts[child].mean(0).repeat(tensor.size(0))
+            return replacement
+        return go
+
+    while len(queue) > 0:
+        node = queue.pop(0)
+
+        baseline = model.run_with_hooks(prompts, ablated)
+
+        if node in done:
+            continue
+        
+        important = []
+
+        sum_diff = 0
+        n_children = 0
+
+        for child in graph.get_children(node):
+            to_ablate = ablated + [(graph.nodes[child], ablate_node(child))]
+
+            out = model.run_with_hooks(prompts, to_ablate)
+            diff = abs(F.cross_entropy(out, baseline).item())
+
+            sum_diff += diff
+            n_children += 1
+
+            if diff > threshold:
+                important.append(child)
+        
+        if n_children > 0:
+            print(node, "has important children", important, "and mean diff", sum_diff / n_children)
+        queue.extend(important)
+        done.append(node)
     
-    def no_cycles(self):
-        # cycle detection algorithm
-        stack = []
-        def dfs(node):
-            stack.append(node)
-            for edge in self.edges:
-                if edge[0] == node:
-                    if edge[1] in stack:
-                        raise ValueError(f"Cycle detected with node {edge[1]}", stack)
-                    dfs(edge[1])
-            stack.pop()
-        dfs(self.root)
-    
-    def all_reachable(self):
-        # check all reachable from root
-        visited = set()
-        def dfs(node):
-            visited.add(node)
-            for edge in self.edges:
-                if edge[0] == node:
-                    dfs(edge[1])
-        dfs(self.root)
-        assert len(visited) == len(self.nodes), "Not all nodes are reachable from root"
-    
-    def get_parents(self, node):
-        return [edge[1] for edge in self.edges if edge[0] == node]
-
-    @classmethod
-    def merge_many(cls, graphs, root):
-        nodes = {root[0]: root[1]}
-        edges = [(graph.root, root[0]) for graph in graphs]
-        roots = [graph.root for graph in graphs]
-        for graph in graphs:
-            nodes.update(graph.nodes)
-            edges.extend(graph.edges)
-        return cls(nodes, edges, root[0])
+    return ComputeGraph.prune_nodes(graph, done)
 
 # model needs to have run_with_hooks method
-def path_tracing(model, graph: ComputeGraph, node: str, prompts: torch.Tensor, counterfactual_activations: Dict[str, torch.Tensor], diff_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], threshold: float, ablation_mode: Literal["zero", "sample", "mean"]) -> ComputeGraph:
-    # recursively find all nodes that affect the output of `node`
-    parent_nodes = graph.get_parents(node)
-    if len(parent_nodes) == 0:
-        return ComputeGraph({node: graph.nodes[node]}, (), node)
-    
+def path_tracing(
+        model: GraphedModel,
+        graph: ComputeGraph,
+        root_n: str,
+        prompts: torch.Tensor,
+        normal_activations: Dict[str, torch.Tensor],
+        counterfactual_activations: Dict[str, torch.Tensor],
+        diff_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        threashold: float,
+        ablation_mode: Literal["zero", "sample", "mean"],
+        cache=None) -> ComputeGraph:
+    # recursively find all nodes that affect the output of `root_n`
+
+    if cache is None:
+        cache = {}
+
+    print("tracing", root_n)
+
+    child_nodes = graph.get_children(root_n)
+    if len(child_nodes) == 0:
+        print(root_n, graph.nodes[root_n])
+        graph = ComputeGraph({root_n: graph.nodes[root_n]}, [], root_n)
+        cache[root_n] = graph
+        return graph
+
+    if root_n in cache:
+        print("cache hit")
+        return cache[root_n]
+
     important = []
 
     # TODO: probably compress this iteration into a single forward pass
-    for parent_n in parent_nodes:
-        parent = graph.nodes[parent_n]
-        parent_cf = parent.hook_read(counterfactual_activations[graph.nodes[parent].hook_point])
+    for child_n in child_nodes:
+        child_hook = graph.nodes[child_n]
+        child_cf = counterfactual_activations[child_n]
+        #print(parent_cf)
         # rerun the network with the parent node ablated
-        def ablate_node(hook_tensor, hook_point):
+        def ablate_node(hook_tensor):
             replacement = None
             if ablation_mode == "zero":
-                replacement = torch.zeros_like(parent_cf)
+                replacement = torch.zeros_like(hook_tensor)
             elif ablation_mode == "sample":
-                replacement = parent_cf[random.randint(0, parent_cf.size(0))].repeat(parent_cf.size(0))
+                replacement = child_cf[random.randint(0, child_cf.size(0)-1)].repeat(hook_tensor.size(0))
             elif ablation_mode == "mean":
-                replacement = parent_cf.mean(dim=0).repeat(parent_cf.size(0))
+                replacement = child_cf.mean(dim=0).repeat(hook_tensor.size(0))
             
             if replacement is None:
                 raise ValueError("Invalid ablation mode")
             
-            return parent.hook_repl(hook_tensor, replacement)
+            return replacement
 
-        diff = diff_fn(model.run_with_hooks(prompts, fwd_hooks=[(parent.hook_point, ablate_node)]), model(prompts)).item()
-        print(f"ablated {parent_n}")
-        if loss > threshold:
-            important.append(parent)
-    
+        ablated_activation = model.run_with_hooks(prompts, fwd_hooks=[(child_hook, ablate_node)], return_hook=root_n)
+        normal_activation = normal_activations[root_n]
+
+        diff = diff_fn(ablated_activation, normal_activation).item()
+        if diff > threashold:
+            print(f"diff {diff} > {threashold} for {child_n} of {root_n}")
+            important.append(child_n)
+
     # recursively call path_tracing on the important nodes
     subgraphs = []
     for parent in important:
-        subgraph = path_tracing(net, graph, parent, prompts, counterfactual_activations, loss_fn, threashold, ablation_mode)
+        subgraph = path_tracing(model, graph, parent, prompts, normal_activations, counterfactual_activations, diff_fn, threashold, ablation_mode, cache)
         subgraphs.append(subgraph)
-    
-    return ComputeGraph.merge_many(subgraphs, root)
+        
+    graph = ComputeGraph.merge_subgraphs(subgraphs, (root_n, graph.nodes[root_n]))
+    cache[root_n] = graph
+    return graph
