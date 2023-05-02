@@ -16,14 +16,18 @@ def autocircuit(
         prompts: torch.Tensor,
         cf_acts: Dict[str, torch.Tensor],
         threshold: float,
-        ablation_mode: Literal["zero", "sample", "mean"] = "sample") -> ComputeGraph:
+        ablation_mode: Literal["zero", "sample", "mean"] = "sample",
+        diff_fn = None) -> ComputeGraph:
     # do a BFS on important nodes
     done = []
     queue = [root_n]
     ablated = []
 
+    if diff_fn is None:
+        diff_fn = F.cross_entropy
+
     def ablate_node(child):
-        def go(tensor):
+        def go(tensor, hook=None):
             all_tensors[child] = tensor.clone()
 
             replacement = None
@@ -50,10 +54,13 @@ def autocircuit(
         n_children = 0
 
         for child in graph.get_children(node):
+            print(f"looking at child {child} of {node}")
+
             to_ablate = ablated + [(graph.nodes[child], ablate_node(child))]
 
             out = model.run_with_hooks(prompts, to_ablate)
-            diff = abs(F.cross_entropy(out, baseline).item())
+            print(out, baseline)
+            diff = abs(diff_fn(out, baseline).item())
 
             sum_diff += diff
             n_children += 1

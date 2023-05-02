@@ -24,7 +24,7 @@ def calc_positions(cfg, nodes=None):
                 pos[node] = (0, 0)
     return pos
 
-def draw_graph(graph: ComputeGraph, cfg):
+def draw_transformer_graph(graph: ComputeGraph, cfg):
     G = networkx.DiGraph()
     for node in graph.nodes.keys():
         G.add_node(node)
@@ -32,4 +32,13 @@ def draw_graph(graph: ComputeGraph, cfg):
         G.add_edge(edge[0], edge[1])
     pos = calc_positions(cfg, graph.nodes.keys())
     networkx.draw(G, pos=pos, with_labels=True)
+    plt.show()
+
+def draw_graph(graph: ComputeGraph):
+    G = networkx.DiGraph()
+    for node in graph.nodes.keys():
+        G.add_node(node)
+    for edge in graph.edges:
+        G.add_edge(edge[0], edge[1])
+    networkx.draw(G, with_labels=True)
     plt.show()

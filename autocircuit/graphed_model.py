@@ -2,6 +2,9 @@ import torch
 from typing import Callable, Dict, Tuple, List, Any
 from abc import ABC, abstractmethod
 
+class Hook(ABC):
+    pass
+
 # thing representing some (contiguous) selection of activations in a network
 class PartialHook:
     def __init__(self, hook_point: str, hook_read: Callable[[torch.Tensor], torch.Tensor], hook_repl: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]):
@@ -32,7 +35,7 @@ class PartialHook:
 # a ComputeGraph is a DAG that represents the causal relationship between hooks/nodes
 # the path tracing algorithm outputs a simpler graph that is a subset of the input graph
 class ComputeGraph:
-    def __init__(self, nodes: Dict[str, PartialHook], edges: Tuple[str, str], root: str):
+    def __init__(self, nodes: Dict[str, Hook], edges: Tuple[str, str], root: str):
         self.nodes = nodes
         self.edges = edges
         self.root = root
@@ -83,9 +86,9 @@ class ComputeGraph:
         return cls(nodes, edges, new_root)
 
     @classmethod
-    def prune_nodes(cls, graph, nodes_to_prune):
-        nodes = {n: v for n, v in graph.nodes.items() if n not in nodes_to_prune}
-        edges = [edge for edge in graph.edges if edge[0] not in nodes_to_prune and edge[1] not in nodes_to_prune]
+    def prune_nodes(cls, graph, nodes_to_keep):
+        nodes = {n: v for n, v in graph.nodes.items() if n in nodes_to_keep}
+        edges = [edge for edge in graph.edges if edge[0] in nodes_to_keep and edge[1] in nodes_to_keep]
         return cls(nodes, edges, graph.root)
 
 # model that corresponds to some compute graph
