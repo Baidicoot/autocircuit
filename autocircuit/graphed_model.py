@@ -62,23 +62,8 @@ class ComputeGraph:
         return [edge[1] for edge in self.edges if edge[0] == node]
 
     @classmethod
-    def merge_subgraphs(cls, graphs, shared_root):
-        nodes = {n: v for graph in graphs for n, v in graph.nodes.items()}
-        edges = list({edge for graph in graphs for edge in graph.edges})
-        nodes[shared_root[0]] = shared_root[1]
-        for graph in graphs:
-            edges.append((shared_root[0], graph.root))
-        return cls(nodes, edges, shared_root[0])
-
-    @classmethod
-    def merge_many(cls, graphs, new_root):
-        nodes = {n: v for graph in graphs for n, v in graph.nodes.items()}
-        edges = list({edge for graph in graphs for edge in graph.edges})
-        return cls(nodes, edges, new_root)
-
-    @classmethod
     def prune_nodes(cls, graph, nodes_to_keep):
-        nodes = {n: v for n, v in graph.nodes.items() if n in nodes_to_keep}
+        nodes = [node for node in graph.nodes if node in nodes_to_keep]
         edges = [edge for edge in graph.edges if edge[0] in nodes_to_keep and edge[1] in nodes_to_keep]
         return cls(nodes, edges, graph.root)
 

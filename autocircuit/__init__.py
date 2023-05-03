@@ -44,6 +44,8 @@ def autocircuit(
         if node in done:
             continue
         
+        print("node", node, "baseline", baseline.size())
+
         important = []
 
         sum_diff = 0
