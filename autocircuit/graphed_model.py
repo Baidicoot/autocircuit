@@ -3,39 +3,30 @@ from typing import Callable, Dict, Tuple, List, Any
 from abc import ABC, abstractmethod
 
 class Hook(ABC):
-    pass
+    @abstractmethod
+    def add_hook(self, hook: Callable[[torch.Tensor], torch.Tensor]):
+        pass
 
-# thing representing some (contiguous) selection of activations in a network
-class PartialHook:
-    def __init__(self, hook_point: str, hook_read: Callable[[torch.Tensor], torch.Tensor], hook_repl: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]):
-        self.hook_point = hook_point
-        self.hook_read = hook_read
-        # hook_repl is a function that takes a tensor and a replacement tensor and returns a tensor
-        self.hook_repl = hook_repl
+class HookManager(ABC):
+    @property
+    @abstractmethod
+    def hooks(self) -> Dict[str, Hook]:
+        pass
 
-    @classmethod
-    def process_hooks(cls, hooks: List[Tuple["PartialHook", Callable[[torch.Tensor], torch.Tensor]]]) -> List[Tuple[str, Callable[[torch.Tensor, Any], torch.Tensor]]]:
-        by_hook_point = {}
-        for hook, fn in hooks:
-            if hook.hook_point not in by_hook_point:
-                by_hook_point[hook.hook_point] = []
-            by_hook_point[hook.hook_point].append((hook, fn))
-        return [(hook_point, cls._merge_fns(fns)) for hook_point, fns in by_hook_point.items()]
-
-    @classmethod
-    def _merge_fns(cls, fns: List[Tuple["PartialHook", Callable[[torch.Tensor], torch.Tensor]]]) -> Callable[[torch.Tensor, Any], torch.Tensor]:
-        def go(tensor, hook=None):
-            before_shape = tensor.shape
-            for hook, fn in fns:
-                tensor = hook.hook_repl(tensor, fn(hook.hook_read(tensor)))
-            assert tensor.shape == before_shape, f"Shape changed from {before_shape} to {tensor.shape} in {hook.hook_point}"
-            return tensor
-        return go
+    @abstractmethod
+    def remove_hooks(self):
+        pass
+    
+    """
+    @abstractmethod
+    def get_layer(self, name: str) -> int:
+        pass
+    """
 
 # a ComputeGraph is a DAG that represents the causal relationship between hooks/nodes
 # the path tracing algorithm outputs a simpler graph that is a subset of the input graph
 class ComputeGraph:
-    def __init__(self, nodes: Dict[str, Hook], edges: Tuple[str, str], root: str):
+    def __init__(self, nodes: List[str], edges: Tuple[str, str], root: str):
         self.nodes = nodes
         self.edges = edges
         self.root = root
@@ -91,18 +82,41 @@ class ComputeGraph:
         edges = [edge for edge in graph.edges if edge[0] in nodes_to_keep and edge[1] in nodes_to_keep]
         return cls(nodes, edges, graph.root)
 
-# model that corresponds to some compute graph
-class GraphedModel(ABC):
-    @abstractmethod
-    def run_with_hooks(self, inputs: torch.Tensor, fwd_hooks: List[Tuple[str, Callable[[torch.Tensor, PartialHook], torch.Tensor]]], return_hook: str = None) -> torch.Tensor:
-        raise NotImplementedError("run_with_hooks not implemented")
-
-    @abstractmethod
-    def __call__(self, inputs: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("__call__ not implemented")
+class GraphedModel:
+    def __init__(self, model, graph: ComputeGraph, hooks: HookManager):
+        self.model = model
+        self.hook_manager = hooks
+        self.graph = graph
     
-    # return the FULL graph
-    @property
-    @abstractmethod
-    def graph(self) -> ComputeGraph:
-        raise NotImplementedError("graph not implemented")
+    def run_with_hooks(self, inputs: torch.Tensor, fwd_hooks: List[Tuple[str, Callable[[torch.Tensor], torch.Tensor]]], return_hook: str = None) -> torch.Tensor:
+        self.hook_manager.remove_hooks()
+        for node, hook in fwd_hooks:
+            self.hook_manager.hooks[node].add_hook(hook)
+        out = None
+        if return_hook is not None:
+            def output_hook(x):
+                nonlocal out
+                out = x
+                return x
+            self.hook_manager.hooks[return_hook].add_hook(output_hook)
+            if hasattr(self.hook_manager, "get_layer"):
+                self.model(inputs, stop_at_layer=self.hook_manager.get_layer(return_hook))
+            else:
+                self.model(inputs)
+            self.hook_manager.remove_hooks()
+            return out
+        else:
+            out = self.model(inputs)
+            self.hook_manager.remove_hooks()
+            return out
+    
+    def run_with_cache(self, inputs: torch.Tensor) -> torch.Tensor:
+        fwd_hooks = []
+        cache = {}
+        for node in self.graph.nodes:
+            def hook(x, n):
+                nonlocal cache
+                cache[n] = x
+                return x
+            fwd_hooks.append((node, lambda x, n=node : hook(x, n)))
+        return self.run_with_hooks(inputs, fwd_hooks), cache

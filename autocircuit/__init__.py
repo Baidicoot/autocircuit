@@ -7,11 +7,8 @@ import torch.nn.functional as F
 
 # TODO: figure out why ablations are fucked
 
-all_tensors = {}
-
 def autocircuit(
         model: GraphedModel,
-        graph: ComputeGraph,
         root_n: str,
         prompts: torch.Tensor,
         cf_acts: Dict[str, torch.Tensor],
@@ -27,9 +24,8 @@ def autocircuit(
         diff_fn = F.cross_entropy
 
     def ablate_node(child):
-        def go(tensor, hook=None):
-            all_tensors[child] = tensor.clone()
-
+        def go(tensor):
+            print("ablated", child)
             replacement = None
             if ablation_mode == "zero":
                 replacement = torch.zeros_like(tensor)
@@ -53,14 +49,11 @@ def autocircuit(
         sum_diff = 0
         n_children = 0
 
-        for child in graph.get_children(node):
-            print(f"looking at child {child} of {node}")
-
-            to_ablate = ablated + [(graph.nodes[child], ablate_node(child))]
+        for child in model.graph.get_children(node):
+            to_ablate = ablated + [(child, ablate_node(child))]
 
             out = model.run_with_hooks(prompts, to_ablate)
-            print(out, baseline)
-            diff = abs(diff_fn(out, baseline).item())
+            diff = abs(F.mse_loss(out, baseline).item())
 
             sum_diff += diff
             n_children += 1
@@ -73,7 +66,7 @@ def autocircuit(
         queue.extend(important)
         done.append(node)
     
-    return ComputeGraph.prune_nodes(graph, done)
+    return ComputeGraph.prune_nodes(model.graph, done)
 
 # model needs to have run_with_hooks method
 def path_tracing(
